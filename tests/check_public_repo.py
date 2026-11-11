@@ -2,9 +2,13 @@
 """Static checks for intentionally-public project sources (no secret values)."""
 from pathlib import Path
 import re
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-tracked = [p for p in ROOT.rglob('*') if p.is_file() and '.git' not in p.parts]
+# Validate only paths staged/tracked by Git; ignored local model binaries are not published.
+paths = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).split(b'\0')
+tracked = [ROOT / raw.decode('utf-8') for raw in paths if raw]
+
 assert (ROOT / 'README.md').exists()
 assert len(list((ROOT / 'docs').glob('*.md'))) >= 9
 for p in tracked:

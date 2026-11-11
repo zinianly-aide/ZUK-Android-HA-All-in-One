@@ -53,6 +53,7 @@ flowchart TB
 8. [安全、许可及发布前脱敏清单](docs/08-security.md)
 9. [实机验收清单](docs/09-validation.md)
 10. [依赖源、哈希与 APK 获取说明](assets/checksums/README.md)
+11. [ZUK 本地离线中文语音实验 M0](experiments/local-voice/README.md)
 
 **硬核部分：** Android 原生 Python ABI 并非 Linux glibc ABI，Home Assistant 的 C/C++/Rust 原生扩展需要 Android Bionic/NDK 的 wheel 适配；请先看第 2 步。**不建议直接在 Android 7 Termux 执行 `pip install homeassistant` 并期待所有包自动工作。**
 

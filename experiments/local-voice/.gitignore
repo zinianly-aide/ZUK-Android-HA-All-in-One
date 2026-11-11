@@ -1,0 +1,18 @@
+# No upstream binary/model and local runtime data in the public repo.
+artifacts/
+abi/
+model/
+*.log
+*.pid
+*.aiff
+*.pcm
+__pycache__/
+# Local provisioning scripts containing host-specific paths and experimental launch steps.
+fetch-model-runtime.sh
+download-model-chunks.py
+stage-on-device.sh
+unpack-test-on-device.sh
+start-on-device.sh
+install-voice-service-file.sh
+voice-m0-service.sh
+test-offline-synthetic.sh
