@@ -1,0 +1,8 @@
+# Minimal isolated Home Assistant Core instance on Android / Termux.
+# DO NOT replace an existing configuration.yaml without making a private backup!
+homeassistant:
+  name: Android HA Lab
+http:
+  server_port: 8125
+config:
+frontend:

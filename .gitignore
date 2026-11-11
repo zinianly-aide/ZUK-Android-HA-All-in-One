@@ -1,0 +1,55 @@
+# Sensitive / private Home Assistant state — NEVER publish.
+config-ha/
+.storage/
+**/.storage/
+**/secrets.yaml
+**/.HA_VERSION
+**/home-assistant_v2.db*
+**/auth*
+**/oauth*
+**/*token*
+**/*credential*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/hosts.yml
+.env*
+!.env.example
+
+# Android packages, device dumps, locally built distributions
+*.apk
+*.aab
+*.apks
+*.xapk
+*.tar
+*.tar.gz
+*.zip
+*.whl
+*.img
+*.bin
+*.dex
+*.so
+
+# Runtime, logs, caches, credentials, staging
+logs/
+cache/
+wheelhouse/
+venv*/
+.venv/
+__pycache__/
+*.log
+*.db
+*.sqlite*
+*.partial
+*.part
+*.downloading
+.DS_Store
+.tmp/
+
+# Do not commit captures of real home/device state
+*.screencap
+*.screenshot
+*.har
+*.pcap
+*.xml.dump

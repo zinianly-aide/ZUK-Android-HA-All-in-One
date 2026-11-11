@@ -1,0 +1,25 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ZUK Home Assistant Core boot start, idempotent and non-destructive.
+set -u
+P=/data/data/com.termux/files/usr
+H=/data/data/com.termux/files/home
+LAB="$H/zuk-ha-native"
+export PREFIX="$P" HOME="$H" PATH="$P/bin:/system/bin" TMPDIR="$P/tmp" LD_LIBRARY_PATH="$P/lib"
+unset LD_PRELOAD
+mkdir -p "$LAB/logs"
+exec >> "$LAB/logs/termux-boot-ha.log" 2>&1
+printf 'BOOT_TRIGGER %s\n' "$(date)"
+PIDFILE="$LAB/run/ha-native.pid"
+if [ -s "$PIDFILE" ]; then
+ OLD=$(cat "$PIDFILE" 2>/dev/null)
+ if [[ "$OLD" =~ ^[0-9]+$ ]] && kill -0 "$OLD" 2>/dev/null; then
+  CMD=$(tr '\0' ' ' < "/proc/$OLD/cmdline" 2>/dev/null)
+  if [[ "$CMD" == *homeassistant* ]];then
+   echo "BOOT_HA_ALREADY_RUNNING_PID=$OLD";exit 0
+  fi
+ fi
+fi
+sleep 20
+if [ ! -x "$LAB/ha-native-service.sh" ];then echo 'BOOT_HA_SCRIPT_MISSING';exit 1;fi
+printf 'BOOT_HA_START_CORE %s\n' "$(date)"
+exec "$P/bin/bash" "$LAB/ha-native-service.sh"

@@ -1,0 +1,38 @@
+# Home Assistant dashboard example, paste into a NEW dashboard in YAML mode.
+# Replace every example entity_id with your own real HA entity IDs.
+# This file contains NO household names, IP addresses, accounts or device IDs.
+title: Android 智能中控
+views:
+  - title: 总览
+    path: home
+    icon: mdi:home-assistant
+    cards:
+      - type: markdown
+        content: |
+          # 智能家居控制中心
+          快速查看常用房间、灯光、温湿度和设备状态。
+      - type: grid
+        columns: 2
+        square: false
+        cards:
+          - type: tile
+            entity: light.example_living_room
+            name: 客厅灯光
+          - type: tile
+            entity: cover.example_curtain
+            name: 窗帘
+          - type: tile
+            entity: climate.example_aircon
+            name: 空调
+          - type: tile
+            entity: fan.example_air_purifier
+            name: 空气净化
+      - type: entities
+        title: 环境与状态
+        entities:
+          - entity: sensor.example_temperature
+            name: 温度
+          - entity: sensor.example_humidity
+            name: 湿度
+          - entity: binary_sensor.example_presence
+            name: 人体存在
