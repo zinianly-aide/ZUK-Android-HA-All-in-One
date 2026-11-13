@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""ZUK SenseVoice V1: offline ASR + read-only HA entity mapping preview.
+"""ZUK SenseVoice V1.1: offline ASR + HA mapping + manual light control.
 
-Security: binds loopback only, performs NO HA actions, does not persist audio,
-transcripts, HA tokens or credentials. HA registries are read read-only.
+Only light.turn_on/turn_off with a fresh one-time confirmation may call HA.
+No automatic actions. A user-created HA token stays in a private on-device file.
 """
 import ctypes
 import json
 import os
 import re
+import secrets
 import time
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 from pathlib import Path
 from threading import Lock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +23,11 @@ TOKENS = ROOT / 'model' / 'tokens.txt'
 LIB = ROOT / 'lib' / 'libzuk-sensevoice.so'
 STORAGE = Path('/data/data/com.termux/files/home/zuk-ha-native/config-ha/.storage')
 MAPPING = ROOT / 'mapping.private.json'
+TOKEN_FILE = ROOT / 'ha-token.private'
+HA_BASE = 'http://127.0.0.1:8125'
+CONFIRM_LOCK = Lock()
+PENDING = {'value': None}
+CONFIRM_TTL = 30
 MAX_PCM = 16000 * 2 * 9
 LOCK = Lock()
 ALIASES = {
@@ -134,6 +142,116 @@ def preview(text):
     return out
 
 
+
+def token_available():
+    return TOKEN_FILE.is_file() and TOKEN_FILE.stat().st_size > 20
+
+
+def read_token():
+    try:
+        return TOKEN_FILE.read_text(encoding='utf-8').strip()
+    except OSError:
+        return ''
+
+
+def ha_call(method, path, token, payload=None):
+    """Local HA only, hardcoded safe paths; never record credentials in logs."""
+    if not token or not path.startswith('/api/'):
+        raise ValueError('invalid HA request')
+    data = None if payload is None else json.dumps(payload).encode('utf-8')
+    req = Request(HA_BASE + path, data=data, method=method,
+                  headers={'Authorization': 'Bearer ' + token,
+                           'Content-Type': 'application/json'})
+    with urlopen(req, timeout=8) as response:
+        # HA service response can be an array; status code is enough for dispatch.
+        response.read(4096)
+        return response.status
+
+
+def store_token(value):
+    """Validate a user-created token; atomically save locally with 0600 mode."""
+    if not isinstance(value, str) or not 25 <= len(value.strip()) <= 2048:
+        raise ValueError('invalid_token_length')
+    value = value.strip()
+    if any(c.isspace() for c in value):
+        raise ValueError('invalid_token_format')
+    status = ha_call('GET', '/api/', value)
+    if status != 200:
+        raise ValueError('HA_token_not_accepted')
+    tmp = TOKEN_FILE.with_name('ha-token.private.tmp')
+    fd = os.open(str(tmp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(value)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, TOKEN_FILE)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def add_pending_confirmation(plan):
+    """Issue a one-time capability, never automatically call HA."""
+    global PENDING
+    with CONFIRM_LOCK:
+        PENDING['value'] = None  # supersede any previous utterance
+        e = plan.get('entity') or {}
+        if not (plan.get('understood') and plan.get('mapping_status') == 'verified'
+                and plan.get('action') in ('turn_on', 'turn_off')
+                and e.get('domain') == 'light' and plan.get('alias') in ALIASES):
+            return plan
+        nonce = secrets.token_urlsafe(32)
+        PENDING['value'] = (nonce, time.monotonic(), plan['alias'],
+                            e['entity_id'], plan['action'])
+        plan['confirmation_required'] = True
+        plan['confirm_id'] = nonce
+        plan['expires_in_seconds'] = CONFIRM_TTL
+        return plan
+
+
+def claim_pending_confirmation(nonce):
+    """Single use; validate latest private mapping again immediately before use."""
+    if not isinstance(nonce, str):
+        return None
+    with CONFIRM_LOCK:
+        item = PENDING.get('value')
+        PENDING['value'] = None
+    if not item or not secrets.compare_digest(item[0], nonce):
+        return None
+    _, created, alias, eid, action = item
+    if time.monotonic() - created > CONFIRM_TTL:
+        return None
+    if ALIASES.get(alias) != 'light' or action not in ('turn_on', 'turn_off'):
+        return None
+    if mapping_get().get(alias) != eid:
+        return None
+    if not any(row['entity_id'] == eid and row['domain'] == 'light'
+               for row in registry_entities()):
+        return None
+    return eid, action
+
+
+def execute_confirmed_light(nonce):
+    """Manual-only HA action with fixed light domain and limited actions."""
+    token = read_token()
+    if not token:
+        return {'error': 'ha_token_not_configured'}, 412
+    item = claim_pending_confirmation(nonce)
+    if item is None:
+        return {'error': 'no_fresh_matching_confirmation'}, 409
+    eid, action = item
+    try:
+        status = ha_call('POST', '/api/services/light/' + action, token,
+                         {'entity_id': eid})
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as e:
+        print('HA_LIGHT_DISPATCH_ERROR', type(e).__name__, flush=True)
+        return {'error': 'ha_request_failed_or_token_expired'}, 502
+    return {'submitted': status == 200, 'action': action,
+            'entity_id': eid, 'ha_http_status': status,
+            'note': 'HA API accepted request; verify device state separately'}, 200
+
+
 class Engine:
     def __init__(self):
         v = ctypes.CDLL(str(LIB))
@@ -188,11 +306,13 @@ class Handler(BaseHTTPRequestHandler):
         p = self.path.split('?', 1)[0]
         if p == '/health':
             return self.respond({'ready': True, 'engine': 'SenseVoice INT8', 'offline': True,
-                                 'ha_connected': STORAGE.exists(), 'actions_enabled': False,
+                                 'ha_connected': STORAGE.exists(), 'token_configured': token_available(),
+                                 'actions_enabled': token_available(), 'manual_confirmation_only': True,
                                  'model_preloaded': True})
         if p == '/entities':
             return self.respond({'entities': registry_entities(), 'aliases': ALIASES,
-                                 'mapping': mapping_get(), 'actions_enabled': False})
+                                 'mapping': mapping_get(), 'actions_enabled': token_available(),
+                                 'manual_confirmation_only': True})
         if p in ('/', '/index.html'):
             return self.respond((WEB / 'index.html').read_text(encoding='utf-8'), mime='text/html; charset=utf-8')
         if p == '/app.js':
@@ -220,8 +340,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 print('INFERENCE_ERROR', type(e).__name__, flush=True)
                 return self.respond({'error': 'inference_failed'}, 500)
+            planned = add_pending_confirmation(preview(text))
             return self.respond({'text': text, 'elapsed_ms': ms,
-                                 'plan': preview(text), 'offline': True, 'executed': False})
+                                 'plan': planned, 'offline': True, 'executed': False})
         if p == '/map':
             if self.headers.get('Content-Type', '').split(';')[0] != 'application/json' or not 2 <= n <= 512:
                 return self.respond({'error': 'invalid_mapping_body'}, 400)
@@ -244,17 +365,38 @@ class Handler(BaseHTTPRequestHandler):
                 tmp.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding='utf-8')
                 os.chmod(tmp, 0o600)
                 os.replace(tmp, MAPPING)
+            with CONFIRM_LOCK:
+                PENDING['value'] = None  # mapping change invalidates older confirmation
             return self.respond({'saved': True, 'alias': alias, 'entity': row,
-                                 'actions_enabled': False})
+                                 'actions_enabled': token_available()})
+        if p == '/credentials':
+            if self.headers.get('Content-Type', '').split(';')[0] != 'application/json' or not 2 <= n <= 2300:
+                return self.respond({'error': 'invalid_token_body'}, 400)
+            try:
+                req = json.loads(self.rfile.read(n))
+                store_token(req['token'])
+            except (HTTPError, URLError, TimeoutError, ValueError, OSError, KeyError, TypeError) as e:
+                print('HA_TOKEN_SETUP_FAILED', type(e).__name__, flush=True)
+                return self.respond({'error': 'HA_token_validation_failed'}, 400)
+            return self.respond({'configured': True, 'manual_confirmation_only': True})
+        if p == '/confirm':
+            if self.headers.get('Content-Type', '').split(';')[0] != 'application/json' or not 2 <= n <= 200:
+                return self.respond({'error': 'invalid_confirmation_body'}, 400)
+            try:
+                req = json.loads(self.rfile.read(n))
+            except (TypeError, ValueError):
+                return self.respond({'error': 'invalid_json'}, 400)
+            answer, code = execute_confirmed_light(req.get('confirm_id'))
+            return self.respond(answer, code)
         return self.respond({'error': 'not_found'}, 404)
 
 
 def main():
-    print('SENSEVOICE_V1_INITIALIZING actions=false listen=127.0.0.1:8127', flush=True)
+    print('SENSEVOICE_V1_INITIALIZING manual-confirm-only listen=127.0.0.1:8127', flush=True)
     engine = Engine()
     server = ThreadingHTTPServer(('127.0.0.1', 8127), Handler)
     server.engine = engine
-    print('SENSEVOICE_V1_READY offline=true actions=false', flush=True)
+    print('SENSEVOICE_V1_READY offline=true manual-confirm-only', flush=True)
     server.serve_forever(poll_interval=0.3)
 
 

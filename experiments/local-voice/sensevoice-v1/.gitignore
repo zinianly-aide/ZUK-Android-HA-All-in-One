@@ -9,3 +9,5 @@ mapping.tmp
 *.pcm
 *.wav
 mapping.private.tmp
+ha-token.private
+ha-token.private.tmp
