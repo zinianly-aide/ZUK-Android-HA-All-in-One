@@ -1,0 +1,11 @@
+local-bin/
+model/
+lib/
+*.log
+*.pid
+__pycache__/
+mapping.private.json
+mapping.tmp
+*.pcm
+*.wav
+mapping.private.tmp
