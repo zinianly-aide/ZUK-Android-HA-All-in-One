@@ -17,8 +17,8 @@ for utterance,(alias,act) in expect.items():
     p=v.parse_intent(utterance)
     assert p.get('valid') and p['alias']==alias and p['action']==act,(utterance,p)
 assert v.parse_intent('把客厅空调调到二十六度')['temperature']==26
-for s in ('打开灯','打开卧室的窗户','关卧室灯并且打开卧室灯','把客厅空调调到60度','打开阳台灯'):
+for s in ('打开灯','打开卧室的窗户','关卧室灯并且打开卧室灯','把客厅空调调到60度','打开阳台灯', '打开客厅灯带', '关闭客厅风扇灯','打开客厅筒灯','打开客厅灯和主卧灯','打开客厅灯和风扇灯', '打开客厅夜灯','打开主卧灯和卧室灯'):
     assert not v.parse_intent(s)['valid'],(s,v.parse_intent(s))
 assert v.preview('打开客厅灯')['executed'] is False
 assert not v.preview('打开灯')['understood']
-print('PREVIEW_TESTS_OK',len(expect)+5,'no_actuation')
+print('PREVIEW_TESTS_OK',len(expect)+12,'no_actuation')

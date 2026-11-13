@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """ZUK SenseVoice V1.1: offline ASR + HA mapping + manual light control.
 
-Only light.turn_on/turn_off with a fresh one-time confirmation may call HA.
+Only verified light entities or the Xiaomi 86v1 ceiling-light relay may be controlled,
+with a fresh one-time manual confirmation. No arbitrary switch control.
 No automatic actions. A user-created HA token stays in a private on-device file.
 """
 import ctypes
@@ -31,14 +32,18 @@ CONFIRM_TTL = 30
 MAX_PCM = 16000 * 2 * 9
 LOCK = Lock()
 ALIASES = {
-    '客厅灯': 'light', '主卧灯': 'light', '卧室灯': 'light',
+    '客厅灯': 'switch', '主卧灯': 'light', '卧室灯': 'light',
     '次卧灯': 'light', '书房灯': 'light', '餐厅灯': 'light',
     '客厅窗帘': 'cover', '主卧窗帘': 'cover', '卧室窗帘': 'cover',
     '客厅空调': 'climate', '主卧空调': 'climate', '卧室空调': 'climate',
 }
 ROOMS = ['客厅', '主卧', '次卧', '卧室', '书房', '餐厅', '阳台', '厨房']
 CATEGORIES = ['灯', '窗帘', '空调']
-ALLOWED_DOMAINS = {'light', 'cover', 'climate'}
+ALLOWED_DOMAINS = {'light', 'cover', 'climate', 'switch'}
+# Fixed MIOT service/property of the middle relay (吸顶灯) in Xiaomi Smart Home Panel.
+# Other switch relays and household plugs are NEVER exposed for voice control.
+PANEL_MODEL = 'xiaomi.controller.86v1'
+PANEL_CEILING_RELAY_SUFFIX = '_86v1_on_p_11_1'
 
 
 def compact(s):
@@ -65,7 +70,12 @@ def parse_intent(transcript):
     s = compact(transcript)
     if not s:
         return {'valid': False, 'reason': '没有识别到内容'}
-    room = next((r for r in ROOMS if r in s), None)
+    # Explicit multi-room phrases are not single-target commands.
+    # Explicitly mentioned room names must be unique, including 主卧 vs 卧室.
+    found_rooms = {r for r in ROOMS if r in s}
+    if len(found_rooms) > 1:
+        return {'valid': False, 'reason': '同时提到了多个房间，请一次只控制一个设备'}
+    room = next(iter(found_rooms), None)
     category = next((c for c in CATEGORIES if c in s), None)
     if not category:
         return {'valid': False, 'reason': '未明确说出灯、窗帘或空调'}
@@ -73,6 +83,12 @@ def parse_intent(transcript):
     if not room:
         return {'valid': False, 'reason': '请明确说出房间名称'}
     alias = room + category
+    # These are different circuits or fixtures, even if their names contain '灯'.
+    # With the panel's three relays, never interpret '灯带/风扇灯' as '客厅灯'.
+    if alias == '客厅灯' and any(x in s for x in (
+        '灯带', '风扇灯', '筒灯', '射灯', '氛围灯', '台灯',
+        '壁灯', '落地灯', '夜灯', '灯条', '灯管')):
+        return {'valid': False, 'reason': '你说的是其他灯具，不是面板第二路吸顶灯'}
     if alias not in ALIASES:
         return {'valid': False, 'reason': '这个房间设备尚不在 V1 白名单'}
     domain = ALIASES[alias]
@@ -116,9 +132,32 @@ def registry_entities():
         dev = by_device.get(e.get('device_id'), {})
         area = by_area.get(e.get('area_id') or dev.get('area_id'), '')
         name = e.get('name') or e.get('original_name') or dev.get('name_by_user') or dev.get('name') or eid
-        result.append({'entity_id': eid, 'domain': domain, 'name': str(name)[:90], 'area': str(area)[:70]})
+        if domain == 'switch':
+            # Only this exact MIOT second-channel relay of the Xiaomi panel.
+            if not (dev.get('model') == PANEL_MODEL and
+                    eid.endswith(PANEL_CEILING_RELAY_SUFFIX) and
+                    '吸顶灯' in str(name) and area == '客厅'):
+                continue
+        result.append({'entity_id': eid, 'domain': domain, 'name': str(name)[:90],
+                       'area': str(area)[:70], 'panel_model': dev.get('model') if domain == 'switch' else None})
     result.sort(key=lambda x: (x['domain'], x['area'], x['name']))
     return result
+
+
+
+def safe_voice_target(alias, entity):
+    """Allow a mapped lamp or exactly the Xiaomi ceiling-light relay, never a plug."""
+    if not isinstance(entity, dict) or alias not in ALIASES:
+        return False
+    if entity.get('domain') != ALIASES[alias]:
+        return False
+    if entity.get('domain') == 'light':
+        return True
+    return (alias == '客厅灯' and entity.get('domain') == 'switch'
+            and entity.get('panel_model') == PANEL_MODEL
+            and str(entity.get('entity_id', '')).endswith(PANEL_CEILING_RELAY_SUFFIX)
+            and '吸顶灯' in str(entity.get('name', ''))
+            and entity.get('area') == '客厅')
 
 
 def mapping_get():
@@ -133,7 +172,7 @@ def preview(text):
     mapping = mapping_get()
     eid = mapping.get(p['alias'])
     row = next((x for x in registry_entities() if x['entity_id'] == eid
-                and x['domain'] == p['domain']), None)
+                and safe_voice_target(p['alias'], x)), None)
     out = {'understood': True, 'alias': p['alias'], 'action': p['action'],
            'temperature': p.get('temperature'), 'mapping_status': 'verified' if row else 'unmapped',
            'entity': row, 'executed': False}
@@ -168,6 +207,30 @@ def ha_call(method, path, token, payload=None):
         return response.status
 
 
+def panel_ceiling_state():
+    """Read-only view of current Xiaomi panel middle relay (no write action)."""
+    eid = mapping_get().get('客厅灯')
+    row = next((x for x in registry_entities() if x['entity_id'] == eid
+                and safe_voice_target('客厅灯', x)), None)
+    if row is None:
+        return {'mapped': False, 'available': False}, 200
+    token = read_token()
+    if not token:
+        return {'mapped': True, 'available': False, 'reason': 'token_not_configured'}, 200
+    req = Request(HA_BASE + '/api/states/' + eid,
+                  headers={'Authorization': 'Bearer ' + token})
+    try:
+        with urlopen(req, timeout=5) as response:
+            state = json.load(response).get('state')
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as e:
+        print('PANEL_STATE_READ_ERROR', type(e).__name__, flush=True)
+        return {'mapped': True, 'available': False, 'reason': 'ha_state_unavailable'}, 200
+    # Only whitelist the expected simple state values, not HA attributes/token.
+    return {'mapped': True, 'available': state in ('on', 'off'),
+            'state': state if state in ('on', 'off', 'unavailable', 'unknown') else 'unknown',
+            'label': '小米智能家庭面板 / 第二路吸顶灯'}, 200
+
+
 def store_token(value):
     """Validate a user-created token; atomically save locally with 0600 mode."""
     if not isinstance(value, str) or not 25 <= len(value.strip()) <= 2048:
@@ -199,7 +262,7 @@ def add_pending_confirmation(plan):
         e = plan.get('entity') or {}
         if not (plan.get('understood') and plan.get('mapping_status') == 'verified'
                 and plan.get('action') in ('turn_on', 'turn_off')
-                and e.get('domain') == 'light' and plan.get('alias') in ALIASES):
+                and safe_voice_target(plan.get('alias'), e)):
             return plan
         nonce = secrets.token_urlsafe(32)
         PENDING['value'] = (nonce, time.monotonic(), plan['alias'],
@@ -222,33 +285,35 @@ def claim_pending_confirmation(nonce):
     _, created, alias, eid, action = item
     if time.monotonic() - created > CONFIRM_TTL:
         return None
-    if ALIASES.get(alias) != 'light' or action not in ('turn_on', 'turn_off'):
+    if ALIASES.get(alias) not in ('light', 'switch') or action not in ('turn_on', 'turn_off'):
         return None
     if mapping_get().get(alias) != eid:
         return None
-    if not any(row['entity_id'] == eid and row['domain'] == 'light'
+    if not any(row['entity_id'] == eid and safe_voice_target(alias, row)
                for row in registry_entities()):
         return None
-    return eid, action
+    return eid, action, ALIASES[alias]
 
 
 def execute_confirmed_light(nonce):
-    """Manual-only HA action with fixed light domain and limited actions."""
+    """Manual-only HA action for a validated light OR the exact Xiaomi panel relay."""
     token = read_token()
     if not token:
         return {'error': 'ha_token_not_configured'}, 412
     item = claim_pending_confirmation(nonce)
     if item is None:
         return {'error': 'no_fresh_matching_confirmation'}, 409
-    eid, action = item
+    eid, action, domain = item
+    if domain not in ('light', 'switch'):
+        return {'error': 'unsupported_control_domain'}, 400
     try:
-        status = ha_call('POST', '/api/services/light/' + action, token,
+        status = ha_call('POST', '/api/services/' + domain + '/' + action, token,
                          {'entity_id': eid})
     except (HTTPError, URLError, TimeoutError, OSError, ValueError) as e:
-        print('HA_LIGHT_DISPATCH_ERROR', type(e).__name__, flush=True)
+        print('HA_SAFE_SWITCH_DISPATCH_ERROR', type(e).__name__, flush=True)
         return {'error': 'ha_request_failed_or_token_expired'}, 502
     return {'submitted': status == 200, 'action': action,
-            'entity_id': eid, 'ha_http_status': status,
+            'entity_id': eid, 'domain': domain, 'ha_http_status': status,
             'note': 'HA API accepted request; verify device state separately'}, 200
 
 
@@ -309,6 +374,9 @@ class Handler(BaseHTTPRequestHandler):
                                  'ha_connected': STORAGE.exists(), 'token_configured': token_available(),
                                  'actions_enabled': token_available(), 'manual_confirmation_only': True,
                                  'model_preloaded': True})
+        if p == '/panel-ceiling-state':
+            body, status = panel_ceiling_state()
+            return self.respond(body, status)
         if p == '/entities':
             return self.respond({'entities': registry_entities(), 'aliases': ALIASES,
                                  'mapping': mapping_get(), 'actions_enabled': token_available(),
@@ -354,7 +422,7 @@ class Handler(BaseHTTPRequestHandler):
             if alias not in ALIASES or not isinstance(eid, str):
                 return self.respond({'error': 'unsupported_alias'}, 400)
             row = next((e for e in registry_entities() if e['entity_id'] == eid
-                        and e['domain'] == ALIASES[alias]), None)
+                        and safe_voice_target(alias, e)), None)
             if not row:
                 return self.respond({'error': 'entity_not_found_or_wrong_domain'}, 400)
             # Writes ONLY explicit alias/entity_id pairs; never writes to HA .storage.
